@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState, type SyntheticEvent } from "react";
 import type { Script } from "../types";
 import { downloadBlob } from "../lib/videoComposer";
 import { fullScriptFromScenes } from "../lib/scriptUtils";
@@ -45,17 +45,69 @@ export function ResultsView({
   onRestart,
   onNewVariation,
 }: Props) {
-  const videoUrl = useMemo(() => URL.createObjectURL(videoBlob), [videoBlob]);
-  const audioUrl = useMemo(() => URL.createObjectURL(audioBlob), [audioBlob]);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [duration, setDuration] = useState(0);
+  const [videoUrl, setVideoUrl] = useState<string>("");
+  const [videoError, setVideoError] = useState<string>("");
+  const [muted, setMuted] = useState(true);
 
+  // Create and revoke the blob URL in the same effect so StrictMode's
+  // setup→cleanup→setup cycle doesn't revoke the URL the <video> is using.
   useEffect(() => {
-    return () => {
-      URL.revokeObjectURL(videoUrl);
-      URL.revokeObjectURL(audioUrl);
+    const v = URL.createObjectURL(videoBlob);
+    setVideoUrl(v);
+    setVideoError("");
+    return () => URL.revokeObjectURL(v);
+  }, [videoBlob]);
+
+  // MediaRecorder-produced WebM/fMP4 frequently have duration:Infinity, which
+  // prevents <video> from showing a first frame or scrubbing. Seeking past the
+  // end forces the browser to re-scan and report the real duration, after
+  // which playback works.
+  function handleLoadedMetadata(e: SyntheticEvent<HTMLVideoElement>) {
+    const el = e.currentTarget;
+    if (!isFinite(el.duration) || el.duration === 0) {
+      const onSeeked = () => {
+        el.removeEventListener("seeked", onSeeked);
+        el.currentTime = 0;
+        setDuration(el.duration || 0);
+        el.play().catch(() => {});
+      };
+      el.addEventListener("seeked", onSeeked);
+      el.currentTime = Number.MAX_SAFE_INTEGER;
+    } else {
+      setDuration(el.duration || 0);
+      el.play().catch(() => {});
+    }
+  }
+
+  function toggleMute() {
+    const el = videoRef.current;
+    if (!el) return;
+    el.muted = !el.muted;
+    setMuted(el.muted);
+    el.play().catch(() => {});
+  }
+
+  function handleVideoError(e: SyntheticEvent<HTMLVideoElement>) {
+    const err = e.currentTarget.error;
+    const codeMap: Record<number, string> = {
+      1: "MEDIA_ERR_ABORTED",
+      2: "MEDIA_ERR_NETWORK",
+      3: "MEDIA_ERR_DECODE",
+      4: "MEDIA_ERR_SRC_NOT_SUPPORTED",
     };
-  }, [videoUrl, audioUrl]);
+    const reason = err
+      ? `${codeMap[err.code] ?? `code ${err.code}`}${
+          err.message ? `: ${err.message}` : ""
+        }`
+      : "Unknown video error";
+    setVideoError(
+      `${reason} · blob type: "${videoBlob.type || "(none)"}" · ${
+        videoBlob.size
+      } bytes`,
+    );
+  }
 
   const ext = videoBlob.type.includes("mp4") ? "mp4" : "webm";
 
@@ -75,17 +127,43 @@ export function ResultsView({
       <div className="grid lg:grid-cols-12 gap-6">
         <div className="lg:col-span-7">
           <div className="card p-5">
-            <div className="rounded-2xl overflow-hidden bg-ink-900 aspect-[9/16] max-h-[80vh] mx-auto">
-              <video
-                ref={videoRef}
-                src={videoUrl}
-                controls
-                playsInline
-                className="w-full h-full object-contain bg-black"
-                onLoadedMetadata={(e) =>
-                  setDuration(e.currentTarget.duration || 0)
-                }
-              />
+            <div className="rounded-2xl overflow-hidden bg-ink-900 aspect-[9/16] max-h-[80vh] mx-auto relative">
+              {videoUrl ? (
+                <>
+                  <video
+                    ref={videoRef}
+                    src={videoUrl}
+                    controls
+                    playsInline
+                    autoPlay
+                    muted={muted}
+                    loop
+                    preload="auto"
+                    className="w-full h-full object-contain bg-black"
+                    onLoadedMetadata={handleLoadedMetadata}
+                    onError={handleVideoError}
+                  />
+                  {muted && !videoError && (
+                    <button
+                      type="button"
+                      onClick={toggleMute}
+                      className="absolute top-3 right-3 z-10 rounded-full bg-black/60 hover:bg-black/80 text-white text-[12px] font-medium px-3 py-1.5 backdrop-blur-sm transition"
+                    >
+                      Tap to unmute
+                    </button>
+                  )}
+                </>
+              ) : (
+                <div className="w-full h-full grid place-items-center text-ink-500 text-sm">
+                  Preparing preview…
+                </div>
+              )}
+              {videoError && (
+                <div className="absolute inset-x-0 bottom-0 bg-red-600/90 text-white text-[12px] px-3 py-2 leading-snug">
+                  Preview failed: {videoError}. The downloaded file should still
+                  work.
+                </div>
+              )}
             </div>
             <div className="mt-4 text-center text-[13px] text-ink-500">
               {duration ? `${duration.toFixed(1)}s · ` : ""}9:16 · 1080×1920
